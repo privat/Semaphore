@@ -1,12 +1,13 @@
+# Most of the code comes from https://github.com/everythingishacked/Semaphore
 import argparse
-from keyboard import keyboard # local fork
-
 import mediapipe as mp
 import cv2
-
+import os
+import subprocess
 from scipy.spatial import distance as dist
 from math import atan, atan2, pi, degrees
 from datetime import datetime
+#from escpos.printer import Usb
 
 DEFAULT_LANDMARKS_STYLE = mp.solutions.drawing_styles.get_default_pose_landmarks_style()
 DEFAULT_HAND_CONNECTIONS_STYLE = mp.solutions.drawing_styles.get_default_hand_connections_style()
@@ -39,7 +40,7 @@ SEMAPHORES = {
   (-90, -45): {'a': "a", 'n': "1"},
   (-90, 0): {'a': "b", 'n': "2"},
   (-90, 45): {'a': "c", 'n': "3"},
-  (-90, 90): {'a': "d", 'n': "4"},
+  (-90, 90): {'a': "d", 'n': "4"},	# ^ v 
   (135, -90): {'a': "e", 'n': "5"},
   (180, -90): {'a': "f", 'n': "6"},
   (225, -90): {'a': "g", 'n': "7"},
@@ -55,7 +56,7 @@ SEMAPHORES = {
   (135, 0): {'a': "q", 'n': "="},
   (180, 0): {'a': "r", 'n': "-"},
   (225, 0): {'a': "s", 'n': "."},
-  (90, 45): {'a': "t", 'n': "`"},
+  (90, 45): {'a': "t", 'n': "|"},
   (135, 45): {'a': "u", 'n': "/"},
   (225, 90): {'a': "v", 'n': '"'},
   (135, 180): {'a': "w"},
@@ -91,9 +92,11 @@ empty_frame = {
 last_frames = FRAME_HISTORY*[empty_frame.copy()]
 
 frame_midpoint = (0,0)
+frame_midpoint2 = (0,0)
 
 current_semaphore = ''
 last_keys = []
+prerecord = None
 
 def get_angle(a, b, c):
   ang = degrees(atan2(c['y']-b['y'], c['x']-b['x']) - atan2(a['y']-b['y'], a['x']-b['x']))
@@ -253,14 +256,32 @@ def get_key_text(keys):
 
 def output(keys, image, display_only=True):
   keystring = '+'.join(keys)
+  # Backspace is not implemented... If only ;)
+  if keystring.startswith("shift+"):
+    keystring = keystring[-1].upper()
+  if keystring.startswith("control+"):
+    keystring = ""
+  if keystring.startswith("escape"):
+    keystring = ""
+  if keystring.startswith("space"):
+    keystring = " "
+  global current_string, prev_string, last_char, onoff, nojump, prerecord
+  
   if len(keystring):
     print("keys:", keystring)
+    if prerecord is None:
+      current_string += keystring
+    else:
+      c = prerecord[0]
+      prerecord = prerecord[1:]
+      if c == '\n':
+        prev_string = current_string
+        current_string = ''
+      else:
+        current_string += c
+
     if not display_only:
       keyboard.press_and_release(keystring)
-    else:
-      to_display = get_key_text(keys)
-      cv2.putText(image, to_display, frame_midpoint,
-        cv2.FONT_HERSHEY_SIMPLEX, 10, (0,0,255), 10)
 
 def render_and_maybe_exit(image, recording):
   cv2.imshow('Semaphore', image)
@@ -269,7 +290,7 @@ def render_and_maybe_exit(image, recording):
   return cv2.waitKey(5) & 0xFF == 27
 
 def main():
-  global last_frames, frame_midpoint
+  global last_frames, frame_midpoint, current_string, prev_string, last_char, onoff, nojump, prerecord
 
   parser = argparse.ArgumentParser()
   parser.add_argument('--input', '-i', help='Input video device or file (number or path), defaults to 0', default='0')
@@ -278,6 +299,7 @@ def main():
   parser.add_argument('--record', '-r', help='Set to any value to save a timestamped AVI in current directory')
   parser.add_argument('--type', '-t', help='Set to any value to type output rather than only display')
   parser.add_argument('--repeat', '-p', help='Set to any value to allow instant semaphore repetitions')
+  parser.add_argument('--hack', help='Prerecorded file')
   args = parser.parse_args()
 
   INPUT = int(args.input) if (args.input and args.input.isdigit()) else args.input
@@ -286,11 +308,19 @@ def main():
   RECORDING = args.record is not None
   DISPLAY_ONLY = args.type is None
   ALLOW_REPEAT = args.repeat is not None
-
+  if args.hack is not None:
+    with open(args.hack, 'r') as f:
+        prerecord = f.read()
+  current_string = '' 
+  prev_string = '' 
+  last_char = ''
+  nojump = 0
+  onoff = False
   cap = cv2.VideoCapture(INPUT)
 
   frame_size = (int(cap.get(3)), int(cap.get(4)))
-  frame_midpoint = (int(frame_size[0]/2), int(frame_size[1]/2))
+  frame_midpoint = (int(frame_size[0]*0.05), int(frame_size[1]*0.95))
+  frame_midpoint2 = (int(frame_size[0]*0.05), int(frame_size[1]*0.85))
 
   recording = cv2.VideoWriter(RECORDING_FILENAME,
     cv2.VideoWriter_fourcc(*'MJPG'), FPS, frame_size) if RECORDING else None
@@ -316,6 +346,11 @@ def main():
             pose_results.pose_landmarks,
             mp.solutions.pose.POSE_CONNECTIONS,
             DEFAULT_LANDMARKS_STYLE)
+
+        cv2.putText(image, prev_string, frame_midpoint2,
+          cv2.FONT_HERSHEY_SIMPLEX, 2, (0,255,0), 4)
+        cv2.putText(image, current_string, frame_midpoint,
+          cv2.FONT_HERSHEY_SIMPLEX, 2, (0,255,0), 4)
 
         hands = []
         hand_index = 0
@@ -416,7 +451,11 @@ def main():
           # repeat last: jump (hips rise + fall)
           # TODO: if ankles are always in view, could be more accurate than hips
           if is_jumping(hipL, hipR):
-            output(last_keys, image, DISPLAY_ONLY)
+            print("JUMP\n")
+            nojump = nojump + 1
+            prev_string = current_string
+            current_string = ''
+            
 
         if render_and_maybe_exit(image, recording):
           break
