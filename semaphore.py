@@ -8,6 +8,7 @@ from scipy.spatial import distance as dist
 from math import atan, atan2, pi, degrees
 from datetime import datetime
 #from escpos.printer import Usb
+import random
 
 DEFAULT_LANDMARKS_STYLE = mp.solutions.drawing_styles.get_default_pose_landmarks_style()
 DEFAULT_HAND_CONNECTIONS_STYLE = mp.solutions.drawing_styles.get_default_hand_connections_style()
@@ -97,6 +98,8 @@ frame_midpoint2 = (0,0)
 current_semaphore = ''
 last_keys = []
 prerecord = None
+prerecord_pace = None 
+prerecord_next = float('inf')
 
 def get_angle(a, b, c):
   ang = degrees(atan2(c['y']-b['y'], c['x']-b['x']) - atan2(a['y']-b['y'], a['x']-b['x']))
@@ -260,17 +263,28 @@ def output(keys, image, display_only=True):
   if keystring.startswith("shift+"):
     keystring = keystring[-1].upper()
   if keystring.startswith("control+"):
-    keystring = ""
+    keystring = "C+"+keystring[-1].upper()
   if keystring.startswith("escape"):
-    keystring = ""
+    keystring = "E+"+keystring[-1].upper()
   if keystring.startswith("space"):
     keystring = " "
   global current_string, prev_string, last_char, onoff, nojump, prerecord
   
   if len(keystring):
+    nextchar(keystring)
+
+    if not display_only:
+      keyboard.press_and_release(keystring)
+
+def nextchar(keystring):
+    global current_string, prev_string, last_char, onoff, nojump, prerecord, prerecord_next
     print("keys:", keystring)
     if prerecord is None:
       current_string += keystring
+    elif len(prerecord) == 0:
+      print("FINI")
+      prerecord = None
+      prerecord_next = float('inf')
     else:
       c = prerecord[0]
       prerecord = prerecord[1:]
@@ -279,9 +293,8 @@ def output(keys, image, display_only=True):
         current_string = ''
       else:
         current_string += c
+      prerecord_next = datetime.now().timestamp() + prerecord_pace + random.random() * prerecord_pace / 10.0
 
-    if not display_only:
-      keyboard.press_and_release(keystring)
 
 def render_and_maybe_exit(image, recording):
   cv2.imshow('Semaphore', image)
@@ -290,7 +303,7 @@ def render_and_maybe_exit(image, recording):
   return cv2.waitKey(5) & 0xFF == 27
 
 def main():
-  global last_frames, frame_midpoint, current_string, prev_string, last_char, onoff, nojump, prerecord
+  global last_frames, frame_midpoint, current_string, prev_string, last_char, onoff, nojump, prerecord, prerecord_pace, prerecord_next
 
   parser = argparse.ArgumentParser()
   parser.add_argument('--input', '-i', help='Input video device or file (number or path), defaults to 0', default='0')
@@ -300,6 +313,7 @@ def main():
   parser.add_argument('--type', '-t', help='Set to any value to type output rather than only display')
   parser.add_argument('--repeat', '-p', help='Set to any value to allow instant semaphore repetitions')
   parser.add_argument('--hack', help='Prerecorded file')
+  parser.add_argument('--hack-speed', help='Prerecorded file pace')
   args = parser.parse_args()
 
   INPUT = int(args.input) if (args.input and args.input.isdigit()) else args.input
@@ -309,6 +323,9 @@ def main():
   DISPLAY_ONLY = args.type is None
   ALLOW_REPEAT = args.repeat is not None
   if args.hack is not None:
+    if args.hack_speed:
+        prerecord_pace = float(args.hack_speed)
+        prerecord_next = datetime.now().timestamp() + prerecord_pace
     with open(args.hack, 'r') as f:
         prerecord = f.read()
   current_string = '' 
@@ -399,7 +416,7 @@ def main():
           mouth = (body[9], body[10])
           palms = (body[19], body[20])
           if is_mouth_covered(mouth, palms):
-            output(['backspace'], image, DISPLAY_ONLY)
+              nextchar('BACK')
 
           # command: left leg lift
           legL = (body[23], body[25], body[27]) # L hip, knee, ankle
@@ -455,6 +472,9 @@ def main():
             nojump = nojump + 1
             prev_string = current_string
             current_string = ''
+
+        if datetime.now().timestamp() > prerecord_next:
+            nextchar('TIMEOUT')
             
 
         if render_and_maybe_exit(image, recording):
